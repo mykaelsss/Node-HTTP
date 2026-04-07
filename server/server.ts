@@ -1,12 +1,17 @@
 import net from 'node:net';
+import { parse } from './multipart'
 
-const ok = (data) => ({ success: true, data })
-const fail = (status, message) => ({ success: false, status, message })
+type ParseResult = 
+    | { success: true; data: unknown }
+    | { success: false; status: number; message: string }
 
-const parseFormUrlEncoded = (body) => {
+const ok = (data: unknown): ParseResult => ({ success: true, data })
+const fail = (status: number, message: string): ParseResult => ({ success: false, status, message })
+
+const parseFormUrlEncoded = (body: Buffer) => {
     try {
-        const bodyData = {}
-        const entries = body.split('&')
+        const bodyData: Record<string, string> = {}
+        const entries = body.toString().split('&')
         for (const entry of entries) {
             const idx = entry.indexOf('=');
             if (idx === -1) continue;
@@ -24,9 +29,9 @@ const parseFormUrlEncoded = (body) => {
     }
 }
 
-const parseJSON = (body) => {
+const parseJSON = (body: Buffer) => {
     try {
-        return ok(JSON.parse(body))
+        return ok(JSON.parse(body.toString()))
     } catch (err) {
         if (err instanceof SyntaxError) {
             return fail(400, err.message)
@@ -35,33 +40,16 @@ const parseJSON = (body) => {
     }
 }
 
-const parseBody = (contentType, body) => {
-    switch (contentType) {
-            case 'application/x-www-form-urlencoded': return parseFormUrlEncoded(body)
-            case 'multipart/form-data': {
 
-            }
-            case 'application/json': return parseJSON(body);
-            case 'text/plain': {
-
-            }
-            case 'application/xml': {
-
-            }
-            case 'text/xml': {
-
-            }
-            case 'application/octet-stream': {
-
-            }
-            default: {
-
-            }
-        }
+const parseBody = (contentTypeHeader: string, body: Buffer): ParseResult => {
+    const contentType = contentTypeHeader.split(';')[0].trim()
+    const parser = bodyParsers[contentType];
+    if (!parser) return fail(400, 'Unsupported Content-Type');
+    return parser(body, contentTypeHeader);
 }
 
-const getBoundary = (contentType) => {
-    const parts = contentType.split(';').map(item => item.trim())
+const getBoundary = (contentTypeHeader: string) => {
+    const parts = contentTypeHeader.split(';').map(item => item.trim())
     const boundaryPrefix = 'boundary='
     let boundary = parts.find(item => item.startsWith(boundaryPrefix))
     if (!boundary) return null
@@ -69,7 +57,20 @@ const getBoundary = (contentType) => {
     return boundary || null
 }
 
-const sendError = (socket, status, message) => {
+const bodyParsers: Record<string, (body: Buffer, contentTypeHeader?: string) => ParseResult> = {
+    'application/json': (body: Buffer) => parseJSON(body),
+    'application/x-www-form-urlencoded': (body: Buffer) => parseFormUrlEncoded(body),
+    'text/plain': (body: Buffer) => ok(body),
+    'multipart/form-data': (body: Buffer, contentTypeHeader: string | undefined) => {
+    if (!contentTypeHeader) return fail(400, 'Missing Content Type Header');
+    const boundary = getBoundary(contentTypeHeader);
+    if (!boundary) return fail(400, 'Missing Boundary');
+    const parts = parse(body, boundary);
+    return ok(parts);
+}
+}
+
+const sendError = (socket: net.Socket, status: number, message: string) => {
     const response = [
         `HTTP/1.1 ${status}`,
         'Content-Type: text/plain',
@@ -77,18 +78,19 @@ const sendError = (socket, status, message) => {
         'Connection: close',
         '',
         message
-    ].join('\r\n')
-    socket.write(response)
-    socket.end()
+    ].join('\r\n');
+    socket.write(response);
+    socket.end();
 }
 
-const processRequest = (socket, requestBuffer) => {
+const processRequest = (socket: net.Socket, requestBuffer: Buffer) => {
+
     const separatorIdx = requestBuffer.indexOf('\r\n\r\n');
     const headerSection = requestBuffer.subarray(0, separatorIdx).toString();
     const headerLines = headerSection.split('\r\n');
     const [method, path, httpVersion] = headerLines[0].split(' ');
 
-    const headers = {};
+    const headers: Record<string, string> = {};
     for (let i = 1; i < headerLines.length; i++) {
         const colonIdx = headerLines[i].indexOf(': ');
         if (colonIdx === -1) continue;
@@ -114,11 +116,11 @@ const processRequest = (socket, requestBuffer) => {
         return sendError(socket, 400, 'Missing Content-Type');
     }
 
-    const contentType = hasBody ? headers['content-type'].split(';')[0].trim() : null;
+    const contentTypeHeader = hasBody ? headers['content-type'] : null;
 
-    if (contentType) {
-        const body = requestBuffer.subarray(separatorIdx + 4).toString();
-        const res = parseBody(contentType, body);
+    if (contentTypeHeader) {
+        const body = requestBuffer.subarray(separatorIdx + 4);
+        const res = parseBody(contentTypeHeader, body);
         if (!res.success) {
             return sendError(socket, res.status, res.message);
         }
@@ -145,7 +147,7 @@ const server = net.createServer((socket) => {
     socket.on('timeout', () => socket.end());
 
     socket.on('data', (chunk) => {
-    buffer = Buffer.concat([buffer, chunk]);
+    buffer = Buffer.concat([buffer, Buffer.from(chunk)]);
 
     while (true) {
         const separatorIdx = buffer.indexOf('\r\n\r\n');
@@ -176,9 +178,8 @@ const server = net.createServer((socket) => {
 
         const requestBuffer = buffer.subarray(0, totalExpected);
         buffer = buffer.subarray(totalExpected);
-        
-        socket.write('HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK');
-        // processRequest(socket, requestBuffer);
+
+        processRequest(socket, requestBuffer);
     }
 });
 
@@ -187,7 +188,6 @@ const server = net.createServer((socket) => {
         socket.destroy();
     });
 })
-
 
 server.listen('3000', () => {
     console.log("server running on port 3000");
