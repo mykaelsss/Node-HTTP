@@ -1,5 +1,7 @@
 import net from 'node:net';
 import { parse } from './multipart'
+import { match, isMethod } from './router'
+import './routes';
 
 type ParseResult = 
     | { success: true; data: unknown }
@@ -88,7 +90,10 @@ const processRequest = (socket: net.Socket, requestBuffer: Buffer) => {
     const separatorIdx = requestBuffer.indexOf('\r\n\r\n');
     const headerSection = requestBuffer.subarray(0, separatorIdx).toString();
     const headerLines = headerSection.split('\r\n');
-    const [method, path, httpVersion] = headerLines[0].split(' ');
+    const [method, rawPath, httpVersion] = headerLines[0].split(' ');
+    const path = rawPath.split('?')[0];
+
+    if (!isMethod(method)) return sendError(socket, 405, 'Method Not Allowed');
 
     const headers: Record<string, string> = {};
     for (let i = 1; i < headerLines.length; i++) {
@@ -117,27 +122,57 @@ const processRequest = (socket: net.Socket, requestBuffer: Buffer) => {
     }
 
     const contentTypeHeader = hasBody ? headers['content-type'] : null;
+    let parsedBody: unknown;
 
     if (contentTypeHeader) {
         const body = requestBuffer.subarray(separatorIdx + 4);
-        const res = parseBody(contentTypeHeader, body);
-        if (!res.success) {
-            return sendError(socket, res.status, res.message);
+        const parseResult = parseBody(contentTypeHeader, body);
+        if (!parseResult.success) {
+            return sendError(socket, parseResult.status, parseResult.message);
         }
+        parsedBody = parseResult.data;
     }
 
-    const responseBody = 'success'
-    const response = [
-        'HTTP/1.1 200 OK',
-        'Content-Type: text/plain',
-        `Content-Length: ${Buffer.byteLength(responseBody)}`,
-        `Connection: ${keepAlive ? 'keep-alive' : 'close'}`,
-        '',
-        responseBody
-    ].join('\r\n')
+    const route = match(method, path);
+    if (!route) return sendError(socket, 404, 'Not Found');
 
-    socket.write(response)
-    if (!keepAlive) socket.end()
+    let statusCode = 200;
+    const httpRes = {
+        status(code: number) {
+            statusCode = code;
+            return httpRes;
+        },
+        send(body: string) {
+            const response = [
+                `HTTP/1.1 ${statusCode}`,
+                'Content-Type: text/plain',
+                `Content-Length: ${Buffer.byteLength(body)}`,
+                `Connection: ${keepAlive ? 'keep-alive' : 'close'}`,
+                '',
+                body
+            ].join('\r\n');
+            socket.write(response);
+            if (!keepAlive) socket.end();
+        },
+        json(data: unknown) {
+            const body = JSON.stringify(data);
+            const response = [
+                `HTTP/1.1 ${statusCode}`,
+                'Content-Type: application/json',
+                `Content-Length: ${Buffer.byteLength(body)}`,
+                `Connection: ${keepAlive ? 'keep-alive' : 'close'}`,
+                '',
+                body
+            ].join('\r\n');
+            socket.write(response);
+            if (!keepAlive) socket.end();
+        }
+    };
+
+    route.handler(
+        { method, path, headers, body: parsedBody, params: route.params },
+        httpRes
+    );
 }
 
 const server = net.createServer((socket) => {
@@ -189,6 +224,10 @@ const server = net.createServer((socket) => {
     });
 })
 
-server.listen('3000', () => {
-    console.log("server running on port 3000");
-});
+if (require.main === module) {
+    server.listen(3000, () => {
+        console.log('server running on port 3000');
+    });
+}
+
+export { server };

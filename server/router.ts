@@ -1,4 +1,8 @@
-type Method = 'PUT' | 'POST' | 'GET' | 'PATCH' | 'DELETE'
+const METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'] as const;
+type Method = typeof METHODS[number];
+
+export const isMethod = (m: string): m is Method => METHODS.includes(m as Method);
+
 
 type Response = {
     send: (body: string) => void,
