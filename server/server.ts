@@ -224,10 +224,6 @@ const server = net.createServer((socket) => {
     });
 })
 
-if (require.main === module) {
-    server.listen(3000, () => {
-        console.log('server running on port 3000');
-    });
-}
-
-export { server };
+server.listen(3000, () => {
+    console.log('server running on port 3000');
+});
